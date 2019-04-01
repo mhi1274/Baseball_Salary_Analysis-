@@ -1,0 +1,202 @@
+---
+title: "PK Shiny App"
+author: "Matt H"
+date: "11/5/2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Librarys needed to run shiny app
+```{r}
+library(dplyr)
+library(class)
+```
+The files needed for this project
+
+```{r}
+batting <- read.csv('Batting.csv')
+people <- read.csv('People.csv')
+salary <- read.csv('Salaries.csv')
+team <- read.csv('Teams.csv')
+team <- filter(team, yearID >= 1985 & yearID <= 2017)
+```
+
+Filtering and editing datasets
+```{r}
+batting <- filter(batting, yearID >= 1985 & yearID <= 2017)
+people$fullname <- paste(people$nameFirst,' ',people$nameLast)
+batting <- merge(batting, people[, c("playerID", "fullname")], by="playerID")
+salary<- filter(salary, yearID >= 1985 & yearID <= 2017)
+batting <- inner_join(batting,salary)
+batting <- filter(batting, SO > 0)
+
+#create postive and negavetive at bat column
+batting$PA <- batting$AB+batting$BB+batting$IBB+batting$HBP+batting$SF
+batting$percent_NAB <- (batting$SO+batting$GIDP)/batting$PA
+batting$percent_positive_ab <- (batting$H+batting$BB+batting$IBB+batting$HBP+batting$SF)/batting$PA
+batting$salary_per_NAB <- batting$salary*batting$percent_NAB
+batting$salary_per_Good_AB <- batting$salary*batting$percent_positive_ab
+batting$diff_salary_good_vs_bad <- batting$salary_per_Good_AB - batting$salary_per_NAB
+batting$class <- ifelse(batting$diff_salary_good_vs_bad > 0,'1','0')
+batting <- filter(batting, PA > 100)
+#Seperting selected columns for final shiny app and K means clustering 
+
+batting_clus <- select(batting,fullname, playerID,yearID,teamID,lgID,salary,percent_positive_ab,percent_NAB,PA,salary_per_NAB,salary_per_Good_AB)
+kmeans_batting <- select(batting,diff_salary_good_vs_bad)
+```
+
+
+```{r}
+# K-Means Clustering with 5 clusters
+fit <- kmeans(kmeans_batting, 5,iter.max = 20)
+
+# combine the cluster with the old data
+clus_df <- data.frame(fit$cluster)
+#View(clus_df)
+kmeans_batting <- cbind(kmeans_batting,clus_df)
+batting <- cbind(batting_clus,kmeans_batting)
+```
+Get Team Salary 
+```{r}
+test <- batting
+payroll <- test %>%
+  group_by(yearID,teamID) %>%
+  summarise(team_payroll = sum(salary))
+
+batting <- inner_join(batting,payroll)
+
+```
+
+
+Creaing how much each team spent on Strike outs vs productive at bats 
+```{r}
+test <- batting
+team_SO <- test %>%
+  group_by(yearID,teamID)%>%
+  summarise(total_salary_NAB = sum(salary_per_NAB))
+
+
+batting <- inner_join(batting,team_SO)
+
+test <- batting
+team_BA <- test %>%
+  group_by(yearID,teamID)%>%
+  summarise(total_salary_GAB = sum(salary_per_Good_AB))
+
+
+batting <- inner_join(batting,team_BA)
+```
+
+Adding Team Win Column
+```{r}
+
+team <- select(team, yearID, teamID,W)
+batting<- inner_join(batting,team)
+batting$diff_payroll <- batting$total_salary_GAB - batting$total_salary_NAB
+```
+```{r}
+write.csv(batting,file = "complete_batting.csv")
+#Exporting Complete dataframe into woring direcorty to be used within shiny app. 
+```
+
+
+
+
+```{R}
+library(shiny)
+library(dplyr)
+library(ggplot2)
+library(plotly)
+library(readtext)
+#CSV file used for this shiny app
+batting <- read.csv('complete_batting.csv')
+
+#Creating the UI
+ui <- fluidPage(
+  titlePanel("Baseball Player Salary Data"),
+  sidebarLayout(
+    sidebarPanel(
+      tabsetPanel(
+        tabPanel("Team Selection Filter",
+                 
+                 checkboxGroupInput("cb","Select Team(s)",choices = unique(batting$teamID),selected = unique(batting$teamID)[1],inline = TRUE),
+                 sliderInput("sl","Payroll of Team", min = 260000, max = 139340457,value = 100000000, dragRange = TRUE)
+        ),
+        tabPanel("Year Filter",sliderInput("SY", "Select Year",min = 1985,max = 2016,value = 2000))
+      )
+    ),
+    mainPanel(
+      tabsetPanel(
+        tabPanel("ReadMe",
+        h2("ReadMe"),
+        includeMarkdown("Readme_Markdown.Rmd")
+        ),
+        
+        tabPanel("Payroll Spent Chart",
+                 h2("Time Line of Team Pay Roll Spent"),
+                 plotlyOutput("line")),
+        tabPanel("Team Wins",
+                 h2("Timeline of Team Wins"),
+                 plotlyOutput("wins")),
+        tabPanel("Cluster Count Bar plot",
+                 h2('Cluster of Players'),
+                 plotlyOutput('clus')),
+        tabPanel("Data Table",
+                 h2("Data Table"),
+                 dataTableOutput(outputId = "table"))
+        
+      )
+    )
+  )
+)
+
+
+
+server <- function(input,output,session){
+  filtered_data <- reactive({filter(batting, teamID == input$cb,team_payroll <= input$sl,yearID <= input$SY)})
+  
+
+  
+  
+   output$line <- renderPlotly(
+    {
+      p <- ggplot(filtered_data(),aes(yearID))+geom_point(aes(y= total_salary_NAB,colour = "total salary N.A.B."))+geom_point(aes(y = total_salary_GAB,colour = "total salary G.A.B."))+geom_line(aes(y = diff_payroll, colour = " G.A.B.- N.A.B."))
+      ggplotly(p)
+      p <- p + ylab("Total Salary Spent($)\n")+xlab("\nYears")
+      
+    }
+  )
+  output$wins <- renderPlotly(
+    {
+      r <- ggplot(filtered_data(),aes(x = yearID))+geom_line(aes( y = W, colour = "W"))
+      ggplotly(r)
+      r <- r + xlab("Years") + ylab("Number of Wins")
+    }
+  )
+  output$table <- renderDataTable(
+    {
+      select(filtered_data(),c('fullname','yearID','teamID','salary','salary_per_NAB','salary_per_Good_AB','diff_salary_good_vs_bad','fit.cluster','W'))
+    }
+  )
+  output$clus <- renderPlotly(
+    {
+      q <- ggplot(filtered_data(),aes(x = fit.cluster))+geom_bar()
+      q <- q + xlab("Cluster Group") + ylab("Number Of Players")
+      ggplotly(q)
+    }
+  )
+  
+
+ }
+
+
+
+shinyApp(ui,server)
+```
+Below is the link to my published App: 
+
+https://matthewheckman.shinyapps.io/Baseball_Salary_Data/
+
